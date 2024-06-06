@@ -1,0 +1,17 @@
+[package]
+name = "git-single-object-fetch"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+clap = { version = "4.5", features = [ "derive" ] }
+flate2 = "1"
+gix-features = "*"
+gix-hash = "*"
+gix-pack = "*"
+gix-packetline = { version = "*", features = [ "blocking-io" ] }
+gix-protocol = { version = "0.45", features = [ "blocking-client" ] }
+gix-url = "*"
+gix-transport = { version = "*", features = [ "http-client-curl" ] }
+os_pipe = "1"
+thiserror = "1"
