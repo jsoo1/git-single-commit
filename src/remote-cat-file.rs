@@ -14,7 +14,7 @@ pub struct Opts {
     pub url: gix_url::Url,
 
     #[arg(required = true)]
-    pub id: gix_hash::ObjectId,
+    pub commit: gix_hash::ObjectId,
 }
 
 pub fn parse_url(s: &str) -> Result<gix_url::Url, gix_url::parse::Error> {
@@ -76,17 +76,17 @@ impl From<Box<dyn std::any::Any + Send>> for Error {
 }
 
 pub fn main() {
-    if let Err(e) = main_inner() {
+    let opts = Opts::parse();
+
+    if let Err(e) = main_inner(opts.url, opts.commit) {
         eprintln!("{}", e);
         std::process::exit(1);
     }
 }
 
-pub fn main_inner() -> Result<(), Error> {
-    let opts = Opts::parse();
-
+pub fn main_inner(url: gix_url::Url, commit: gix_hash::ObjectId) -> Result<(), Error> {
     let mut con = connect(
-        opts.url,
+        url,
         connect::Options {
             version: transport::Protocol::V2,
             ..connect::Options::default()
@@ -106,7 +106,7 @@ pub fn main_inner() -> Result<(), Error> {
         vec![("no-progress", None), ("shallow", None)],
         false,
     );
-    args.want(opts.id);
+    args.want(commit);
     args.deepen(1);
 
     let (pkt_lines_r, mut pkt_lines_w) = os_pipe::pipe()?;
