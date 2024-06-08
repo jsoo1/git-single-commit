@@ -1,25 +1,13 @@
-use clap::Parser;
 use gix_features::zlib;
 use gix_pack::data::{entry, input};
 use gix_protocol::{
     fetch,
-    transport::{self, client::connect},
+    transport::{
+        self,
+        client::{connect, TransportV2Ext},
+    },
 };
 use std::io::Write;
-
-#[derive(Parser, Debug)]
-#[command(about = "git cat-file -p on a remote using the \"smart\" protocol")]
-pub struct Opts {
-    #[arg(required = true, value_parser = parse_url)]
-    pub url: gix_url::Url,
-
-    #[arg(required = true)]
-    pub commit: gix_hash::ObjectId,
-}
-
-pub fn parse_url(s: &str) -> Result<gix_url::Url, gix_url::parse::Error> {
-    gix_url::parse(s.into())
-}
 
 #[derive(thiserror::Error, Debug)]
 pub enum Error {
@@ -75,32 +63,28 @@ impl From<Box<dyn std::any::Any + Send>> for Error {
     }
 }
 
-pub fn main() {
-    let opts = Opts::parse();
+pub fn main(url: gix_url::Url, object: Vec<u8>) -> Result<(), Error> {
+    let mut con = connect(url, connect::Options::default())?;
 
-    if let Err(e) = main_inner(opts.url, opts.commit) {
-        eprintln!("{}", e);
-        std::process::exit(1);
-    }
-}
-
-pub fn main_inner(url: gix_url::Url, commit: gix_hash::ObjectId) -> Result<(), Error> {
-    let mut con = connect(
-        url,
-        connect::Options {
-            version: transport::Protocol::V2,
-            ..connect::Options::default()
-        },
-    )?;
-
-    {
-        let handshake = con.handshake(transport::Service::UploadPack, &[])?;
+    let server_capabilities = {
+        let handshake = con.handshake(transport::Service::ReceivePack, &[])?;
 
         if handshake.actual_protocol != transport::Protocol::V2 {
             Err(Error::UnsupportedServer)?;
         }
-    }
 
+        handshake.capabilities
+    };
+
+    //     con.invoke<'a>(
+    //     &mut self,
+    //     command: &str,
+    //     capabilities: impl Iterator<Item = (&'a str, Option<impl AsRef<str>>)> + 'a,
+    //     arguments: Option<impl Iterator<Item = bstr::BString>>,
+    //     trace: bool,
+    // ) -> Result<Box<dyn ExtendedBufRead<'_> + Unpin + '_>, Error>;
+
+    let foo = con.invoke("git-upload-pack", vec![], (), false);
     let mut args = fetch::Arguments::new(
         transport::Protocol::V2,
         vec![("no-progress", None), ("shallow", None)],

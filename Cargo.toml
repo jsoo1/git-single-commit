@@ -5,7 +5,11 @@ edition = "2021"
 
 [[bin]]
 name = "remote-cat-file"
-path = "src/remote-cat-file.rs"
+path = "src/bin/remote-cat-file.rs"
+
+[[bin]]
+name = "push-single-commit"
+path = "src/bin/push-single-commit.rs"
 
 [dependencies]
 clap = { version = "4.5", features = [ "derive" ] }
