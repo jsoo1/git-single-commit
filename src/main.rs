@@ -6,7 +6,6 @@ use gix_protocol::{
     transport::{self, client::connect},
 };
 use std::io::Write;
-use std::sync::mpsc;
 
 #[derive(Parser, Debug)]
 #[command(about = "git cat-file -p on a remote using the \"smart\" protocol")]
@@ -60,8 +59,14 @@ pub enum Error {
     #[error("decompressing: {0}")]
     Decompressing(#[from] gix_features::zlib::inflate::Error),
 
-    #[error("fitting git sizes into usize")]
+    #[error("fitting git sizes into usize: {0}")]
     BitWidthMismatch(#[from] std::num::TryFromIntError),
+
+    #[error("invalid utf-8: {0}")]
+    InvalidUtf8(#[from] std::string::FromUtf8Error),
+
+    #[error("we chose KeepAndCrc32, so we should have kept our compressed bytes in the entry")]
+    MissingCompressedBytes,
 }
 
 impl From<Box<dyn std::any::Any + Send>> for Error {
@@ -106,9 +111,7 @@ pub fn main_inner() -> Result<(), Error> {
 
     let (pkt_lines_r, mut pkt_lines_w) = os_pipe::pipe()?;
 
-    let (entries_tx, entries_rx) = mpsc::channel();
-
-    let pkt_lines_hdl = std::thread::spawn(move || -> Result<Vec<u8>, Error> {
+    let pkt_lines_hdl = std::thread::spawn(move || -> Result<(), Error> {
         let mut buf = args.send(&mut con, true)?;
 
         let res =
@@ -118,14 +121,13 @@ pub fn main_inner() -> Result<(), Error> {
             panic!("no pack from server");
         }
 
-        let mut data = Vec::with_capacity(4096);
-
         while let Some(line) = buf.readline() {
             use gix_packetline::BandRef;
             match line??.decode_band()? {
                 BandRef::Data(d) => {
-                    pkt_lines_w.write(d)?;
-                    data.extend_from_slice(d);
+                    if let Err(_) = pkt_lines_w.write(d) {
+                        break;
+                    }
                 }
                 BandRef::Progress(_d) => {}
                 BandRef::Error(d) => {
@@ -134,10 +136,10 @@ pub fn main_inner() -> Result<(), Error> {
             }
         }
 
-        Ok(data)
+        Ok(())
     });
 
-    let entries_hdl = std::thread::spawn(move || -> Result<(), Error> {
+    let entries_hdl = std::thread::spawn(move || -> Result<input::Entry, Error> {
         let entries = input::BytesToEntriesIter::new_from_header(
             std::io::BufReader::new(pkt_lines_r),
             input::Mode::Verify,
@@ -145,39 +147,31 @@ pub fn main_inner() -> Result<(), Error> {
             gix_hash::Kind::default(),
         )?;
 
-        Ok(for entry in entries {
-            entries_tx.send(entry).unwrap_or(())
-        })
-    });
+        for entry in entries {
+            let e = entry?;
 
-    let find_commit_hdl = std::thread::spawn(move || -> Result<input::Entry, Error> {
-        while let Ok(msg) = entries_rx.recv() {
-            let entry = msg?;
-
-            if entry.header == entry::Header::Commit {
-                return Ok(entry);
+            if e.header == entry::Header::Commit {
+                return Ok(e);
             }
         }
 
         Err(Error::NoCommitFound)
     });
 
-    entries_hdl.join()??;
+    pkt_lines_hdl.join()??;
 
-    let data = pkt_lines_hdl.join()??;
-
-    let entry = find_commit_hdl.join()??;
+    let entry = entries_hdl.join()??;
 
     let entry_size = entry.decompressed_size.try_into()?;
 
-    let entry_offset = (entry.pack_offset + entry.header_size as u64).try_into()?;
+    let mut commit_obj = Vec::new();
 
-    let mut commit_obj = Vec::with_capacity(entry_size);
+    commit_obj.resize(entry_size, 0);
+
+    let compressed = &entry.compressed.ok_or(Error::MissingCompressedBytes)?;
 
     let (_status, _consumed_in, _consumed_out) =
-        zlib::Inflate::default().once(&data[entry_offset..], &mut commit_obj)?;
+        zlib::Inflate::default().once(&compressed, &mut commit_obj)?;
 
-    println!("{}", String::from_utf8_lossy(&commit_obj).to_owned());
-
-    Ok(())
+    Ok(std::io::stdout().write_all(&commit_obj)?)
 }
