@@ -1,11 +1,6 @@
-use gix_features::zlib;
-use gix_pack::data::{entry, input};
-use gix_protocol::{
-    fetch,
-    transport::{
-        self,
-        client::{connect, TransportV2Ext},
-    },
+use gix_protocol::transport::{
+    self,
+    client::{self, connect, TransportWithoutIO},
 };
 use std::io::Write;
 
@@ -14,148 +9,79 @@ pub enum Error {
     #[error("parsing git url: {0}")]
     Connecting(#[from] connect::Error),
 
+    #[error("parsing commit: {0}")]
+    ParsingCommit(#[from] gix_object::decode::Error),
+
     #[error("io error: {0}")]
     IOError(#[from] std::io::Error),
-
-    #[error("thread panicked")]
-    ThreadPanicked,
-
-    #[error("server does not advertise version 2 protocol")]
-    UnsupportedServer,
 
     #[error("git client error: {0}")]
     GitClientError(#[from] transport::client::Error),
 
-    #[error("git response error: {0}")]
-    Fetching(#[from] fetch::response::Error),
-
     #[error("reading pkt-line: {0}")]
     ReadingPktLine(#[from] gix_packetline::decode::Error),
-
-    #[error("with pack response: {0}")]
-    BadPack(String),
-
-    #[error("decoding pack band: {0}")]
-    DecodingPackBand(#[from] gix_packetline::decode::band::Error),
-
-    #[error("iterating pack entries: {0}")]
-    IteratingPackEntries(#[from] input::Error),
-
-    #[error("no commit found")]
-    NoCommitFound,
-
-    #[error("decompressing: {0}")]
-    Decompressing(#[from] gix_features::zlib::inflate::Error),
-
-    #[error("fitting git sizes into usize: {0}")]
-    BitWidthMismatch(#[from] std::num::TryFromIntError),
-
-    #[error("invalid utf-8: {0}")]
-    InvalidUtf8(#[from] std::string::FromUtf8Error),
-
-    #[error("we chose KeepAndCrc32, so we should have kept our compressed bytes in the entry")]
-    MissingCompressedBytes,
 }
 
-impl From<Box<dyn std::any::Any + Send>> for Error {
-    fn from(_: Box<dyn std::any::Any + Send>) -> Self {
-        Error::ThreadPanicked
-    }
-}
+pub fn main<'a>(
+    url: gix_url::Url,
+    _commit: gix_object::CommitRef<'a>,
+    id: gix_hash::ObjectId,
+    rref: &[u8],
+) -> Result<(), Error> {
+    let mut con = connect(
+        url,
+        connect::Options {
+            version: transport::Protocol::V1,
+            ..connect::Options::default()
+        },
+    )?;
 
-pub fn main(url: gix_url::Url, object: Vec<u8>) -> Result<(), Error> {
-    let mut con = connect(url, connect::Options::default())?;
+    let mut line_writer = con.request(
+        client::WriteMode::OneLfTerminatedLinePerWriteCall,
+        client::MessageKind::Text(&b"done"[..]),
+        false,
+    )?;
 
-    let server_capabilities = {
-        let handshake = con.handshake(transport::Service::ReceivePack, &[])?;
+    let create: &'static [u8] = {
+        let mut b = Vec::from(b"0000000000000000000000000000000000000000 ");
 
-        if handshake.actual_protocol != transport::Protocol::V2 {
-            Err(Error::UnsupportedServer)?;
-        }
+        b.extend_from_slice(id.to_string().as_bytes());
 
-        handshake.capabilities
+        b.extend_from_slice(b" ");
+
+        b.extend_from_slice(rref);
+
+        b.extend_from_slice(&[0; 1]);
+
+        b.extend_from_slice(b" ");
+
+        b.leak()
     };
 
-    //     con.invoke<'a>(
-    //     &mut self,
-    //     command: &str,
-    //     capabilities: impl Iterator<Item = (&'a str, Option<impl AsRef<str>>)> + 'a,
-    //     arguments: Option<impl Iterator<Item = bstr::BString>>,
-    //     trace: bool,
-    // ) -> Result<Box<dyn ExtendedBufRead<'_> + Unpin + '_>, Error>;
+    std::io::stderr().write_all(create)?;
 
-    let foo = con.invoke("git-upload-pack", vec![], (), false);
-    let mut args = fetch::Arguments::new(
-        transport::Protocol::V2,
-        vec![("no-progress", None), ("shallow", None)],
+    std::io::stderr().write_all(b"\n")?;
+
+    line_writer.write_message(client::MessageKind::Text(create))?;
+
+    let (w, r) = line_writer.into_parts();
+
+    let mut line_writer = client::RequestWriter::new_from_bufread(
+        w,
+        r,
+        client::WriteMode::Binary,
+        client::MessageKind::Flush,
         false,
     );
-    args.want(commit);
-    args.deepen(1);
 
-    let (pkt_lines_r, mut pkt_lines_w) = os_pipe::pipe()?;
+    line_writer.write_message(client::MessageKind::Text(b"PACK"))?;
 
-    let pkt_lines_hdl = std::thread::spawn(move || -> Result<(), Error> {
-        let mut buf = args.send(&mut con, true)?;
+    let mut buf = line_writer.into_read()?;
 
-        let res =
-            fetch::Response::from_line_reader(transport::Protocol::V2, &mut buf, true, false)?;
+    while let Some(line) = buf.readline() {
+        let l = line??.as_slice().unwrap_or(b"line was not a slice");
+        eprintln!("{}", String::from_utf8_lossy(l).to_owned());
+    }
 
-        if !res.has_pack() {
-            panic!("no pack from server");
-        }
-
-        while let Some(line) = buf.readline() {
-            use gix_packetline::BandRef;
-            match line??.decode_band()? {
-                BandRef::Data(d) => {
-                    if let Err(_) = pkt_lines_w.write(d) {
-                        break;
-                    }
-                }
-                BandRef::Progress(_d) => {}
-                BandRef::Error(d) => {
-                    return Err(Error::BadPack(String::from_utf8_lossy(d).into_owned()));
-                }
-            }
-        }
-
-        Ok(())
-    });
-
-    let entries_hdl = std::thread::spawn(move || -> Result<input::Entry, Error> {
-        let entries = input::BytesToEntriesIter::new_from_header(
-            std::io::BufReader::new(pkt_lines_r),
-            input::Mode::Verify,
-            input::EntryDataMode::KeepAndCrc32,
-            gix_hash::Kind::default(),
-        )?;
-
-        for entry in entries {
-            let e = entry?;
-
-            if e.header == entry::Header::Commit {
-                return Ok(e);
-            }
-        }
-
-        Err(Error::NoCommitFound)
-    });
-
-    pkt_lines_hdl.join()??;
-
-    let entry = entries_hdl.join()??;
-
-    let entry_size = entry.decompressed_size.try_into()?;
-
-    let mut commit_obj = Vec::new();
-
-    commit_obj.resize(entry_size, 0);
-
-    let compressed = &entry.compressed.ok_or(Error::MissingCompressedBytes)?;
-
-    let (_status, _consumed_in, _consumed_out) =
-        zlib::Inflate::default().once(&compressed, &mut commit_obj)?;
-
-    Ok(std::io::stdout().write_all(&commit_obj)?)
+    Ok(())
 }

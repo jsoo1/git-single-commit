@@ -247,6 +247,7 @@ dependencies = [
  "flate2",
  "gix-features",
  "gix-hash",
+ "gix-object",
  "gix-pack",
  "gix-packetline",
  "gix-protocol",
