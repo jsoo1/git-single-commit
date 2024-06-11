@@ -1,5 +1,5 @@
 [package]
-name = "git-single-commit"
+name = "git-single-object-fetch"
 version = "0.1.0"
 edition = "2021"
 
@@ -14,12 +14,12 @@ path = "src/bin/push-single-commit.rs"
 [dependencies]
 clap = { version = "4.5", features = [ "derive" ] }
 flate2 = "1"
-gix-features = { path = "../gitoxide/gix-features" }
-gix-hash = { path = "../gitoxide/gix-hash" }
-gix-pack = { path = "../gitoxide/gix-pack" }
+gix-features = "*"
+gix-hash = "*"
+gix-pack = "*"
 gix-packetline = { version = "*", features = [ "blocking-io" ] }
-gix-protocol = { path = "../gitoxide/gix-protocol", features = [ "blocking-client" ] }
-gix-url = { path = "../gitoxide/gix-url" }
+gix-protocol = { version = "0.45", features = [ "blocking-client" ] }
+gix-url = "*"
 gix-transport = { version = "*", features = [ "http-client-curl" ] }
 os_pipe = "1"
 thiserror = "1"
